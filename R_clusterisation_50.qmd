@@ -1,0 +1,272 @@
+---
+title: "Sélection des 50 villes - clusterisation"
+format: html
+editor: visual
+---
+
+### Set-up
+
+```{r}
+library(dplyr)
+library(magrittr)
+library(leaflet)
+library(leaflet.extras)
+library(leaflet.providers)
+library(leaflegend)
+library(tmaptools)
+library(tidyr) 
+library(dplyr)
+library(ggplot2)
+set.seed(1328)
+```
+
+### Read data
+
+```{r read_data}
+dataset = read.csv("clustering_300.csv") %>% 
+  select(-c("veto","cluster_900", "Pop_change", "pop_1980","pop_2020", "wikipedia_density_country", "area")) # remove variables which have an empty row 
+```
+
+### Apply clustering
+
+##### Define functions
+
+```{r sep_vars}
+sep_vars <- function(dataset){
+  dataset = dataset %>% 
+    na.omit() # remove empty values
+
+  # specify types of variables
+  # only categorical and numerical data will be used for the PCA
+    vars_id = "FID" # id
+    
+    vars_des = c("urban_aggl","ID","longitude", "latitude","country", "continent", "sub_cont","layer", "clco","biome","climate") # descriptive 
+    
+    vars_cat = c("wikipedia_density_grid","wikipedia_local","OSM") # categorical 
+    
+    vars_num = c("serp_1", "serp_2", "serp_3", "serp_4", "serp_5", "serp_6", "serp_NA", "MNT_med","agb_med","bio03_med", "bio08_med","bio19_med","change_neg_sum", "change_pos_sum",  "Map_mode", "cost_shoreline_med", "pop_growth", "Map_10_sum", "Map_20_sum", "Map_30_sum", "Map_40_sum", "Map_50_sum", "Map_60_sum", "Map_70_sum", "Map_80_sum", "Map_90_sum", "Map_95_sum", "Map_100_sum", "GRWL_width_max","GRWL_width_min") # numerical
+
+  return(list(dataset = dataset,
+              vars_id = vars_id,
+              vars_des = vars_des,
+              vars_cat = vars_cat,
+              vars_num = vars_num))
+}
+```
+
+```{r hclust}
+run_hclust <- function(dataset, nclust, namevar = "cluster"){
+    # add leading zeros to cluster number to keep order
+    ndigits = ceiling(nclust/10)
+    # normalize numerical data
+    vars = sep_vars(dataset)
+    dataset = dataset %>% 
+      mutate_if(is.character, as.factor)
+    dataclust = dataset %>% 
+      dplyr::select(vars$vars_cat,vars$vars_num)
+    distobj = cluster::daisy(dataclust) # calcul distance entre chaque objet
+     
+    tree = hclust(distobj) # classification
+    datan = dataset %>% # écrire résultats dans le dataset
+      dplyr::mutate(cluster = cutree(tree,k = nclust)) %>% 
+      dplyr::mutate(cluster = paste0("cl",
+                                   sprintf(glue::glue("%0{ndigits}d"),
+                                           cluster)))%>% 
+      dplyr::mutate(cluster = as.factor(cluster))# %>% 
+     # dplyr::select(FID,cluster,dplyr::everything())
+    return(datan)
+}
+```
+
+##### Run functions
+
+```{r run}
+clusters = run_hclust(dataset, nclust)
+clusters = clusters %>% 
+  mutate(urban_aggl = as.character(urban_aggl))
+```
+
+### Map clusters
+
+```{r map_clusters}
+
+# define color palette with "Set1" being the chosen palette on colorbrewer
+# and nclust being the number of clusters
+ma_palette = colorFactor(get_brewer_pal("Set1", nclust), clusters$cluster)
+  
+# plot 
+ma_carte = leaflet(data = clusters, options = leafletOptions(zoomControl = TRUE, minZoom = 1, maxZoom = 5)) %>% 
+  addProviderTiles("CartoDB.PositronNoLabels") %>% 
+  addCircleMarkers(~longitude, 
+                   ~latitude,
+                   label = dataset$urban_aggl,
+                   color = ~ma_palette(cluster),
+                   opacity = 1, 
+                   radius = 1) %>% 
+  addLegend(pal = ma_palette, values = ~ clusters$cluster, opacity = 1, title = "10 clusters")
+
+# print the result
+ma_carte
+```
+
+### Describe clusters
+
+```{r}
+
+# simplification for what's next 
+dataset = clusters 
+```
+
+```{r form_palette}
+form_palette=function(dataset, varname){
+  vars=sep_vars(dataset)
+  x=dataset[[varname]]
+  
+  pal=fun_palette(dataset,varname)
+  # For categorical variables
+  if(varname %in% vars$vars_cat){
+     datacol=tibble::tibble(categories = dataset[[varname]]) %>% 
+       dplyr::group_by(categories) %>% 
+       dplyr::summarise(colors=pal(unique(categories)))
+  }
+  # For numerical variables
+  if(varname %in% vars$vars_num){
+    q=quantile(x,seq(0,1,by=0.1))
+    datacol=tibble::tibble(x,
+                           categories=cut(x,q,include.lowest=T)) %>% 
+      dplyr::mutate(colors=pal(x)) %>% 
+      dplyr::group_by(categories) %>% 
+      dplyr::summarise(colors=unique(colors)) %>% 
+      dplyr::arrange(categories) %>% 
+      dplyr::mutate(catmin=q[1:10],
+                    catmax=q[2:11])
+  }
+
+    return(datacol)
+}
+```
+
+```{r fun_palette}
+fun_palette <- function(dataset,varname){
+  vars=sep_vars(dataset)
+  x=dataset[[varname]]
+  # For categorical variables
+  if(varname %in% vars$vars_cat){
+     pal=function(x){
+       nb.cols = length(levels(x))
+       # get a list of colors according to the total number of factor levels
+       colslist = rev(grDevices::colorRampPalette(RColorBrewer::brewer.pal(8, "RdYlBu"))(nb.cols))
+       # assign color to each element of x
+       cols=colslist[as.numeric(x)]
+       return(cols)
+     }
+  }
+  # For numerical variables
+  if(varname %in% vars$vars_num){
+        pal=function(x){
+             # get a list of colors according to the total number of factor levels
+             colslist = grDevices::colorRampPalette(RColorBrewer::brewer.pal(8,"RdYlBu"))(10)
+             # assign color to each element of x
+             cutx=cut(x,quantile(x,seq(0,1,by=0.1)),include.lowest=TRUE)
+             cols=colslist[as.numeric(cutx)]
+             return(cols)
+        }
+  }
+  # For other variables
+  if(!(varname %in% c(vars$vars_cat,vars$vars_num))){
+      pal=function(x){return("#FF0000",length(x))}
+  }
+  return(pal)
+}
+```
+
+```{r norm_data}
+norm_data <- function(dataset, label = "name", type = "rank"){
+  # Keep only complete rows
+  datacomp = dataset %>% 
+    sep_vars() %>% 
+    .$dataset
+  
+  vars_num = dataset %>% 
+    sep_vars() %>% 
+    .$vars_num
+  
+  dataset_norm = datacomp[,vars_num] %>% 
+    dplyr::select_if(is.numeric)
+  if(type == "rank"){
+    dataset_norm = dataset_norm %>% 
+      dplyr::mutate_all(~rank(.)) 
+  }
+  if(type == "center_and_scale"){
+    dataset_norm = dataset_norm %>% 
+      dplyr::mutate_all(~.-mean(.)) %>%
+      dplyr::mutate_all(~./sd(.)) 
+  }
+  dataset_norm = dataset_norm %>% 
+    dplyr::mutate(name = datacomp[["urban_aggl"]]) %>% 
+    tibble::remove_rownames() %>% 
+    tibble::column_to_rownames("name")
+  
+  return(dataset_norm)
+}
+```
+
+##### Describe categorical variables :
+
+```{r describe_clusters_cat}
+describe_clusters_cat <- function(dataset){
+    
+  # get categorial data
+  dataset_cat = dataset[,vars$vars_cat]
+  dataset_cat = cbind(cluster = dataset$cluster,dataset_cat) %>%
+    tidyr::pivot_longer(cols = -cluster)
+  # get color palette    
+  datacol = get_brewer_pal("Spectral", n = 10)
+  # plot
+  pcat=ggplot2::ggplot(dataset_cat,
+                         ggplot2::aes(x=value,fill=cluster))+
+      ggplot2::geom_bar()+
+      ggplot2::coord_flip()+
+      ggplot2::facet_wrap(ggplot2::vars(name),scales="free_y")+
+      ggplot2::scale_fill_manual(values=datacol)
+}
+```
+
+##### Describe numerical variables
+
+```{r describe_clusters_num}
+describe_clusters_num <- function(dataset, display_ranks){
+
+  # get numerical data
+    vars = sep_vars(dataset)
+    if (display_ranks){
+      dataset_num = norm_data(dataset)
+    }else{
+      dataset_num = dataset[,vars$vars_num]
+    }
+    
+  # there are too many numerical variables 
+  # to represent them on the the same plot
+  # let's split the dataset in 2 parts 
+  dataset_num1 = dataset_num[,1:5] 
+  dataset_num2 = dataset_num[,16:29]
+  
+  dataset_num1 = cbind(cluster = clusters$cluster, dataset_num1) %>%
+    mutate_all(as.numeric) %>% # convert all variables to numeric
+    tidyr::pivot_longer(cols=-cluster)
+  dataset_num2 = cbind(cluster = clusters$cluster, dataset_num2) %>%
+    mutate_all(as.character) %>% # convert all variables to character
+    tidyr::pivot_longer(cols=-cluster)
+  
+  # get color palette    
+  datacol = form_palette(dataset, "cluster")
+  
+  # plot  (BUG ICI : ne fonctionne pas !! voir avec Lise ?)
+  pnum = ggplot(dataset_num1,
+                aes(x = cluster, y = value, fill = cluster)) +
+    geom_boxplot() +
+    facet_wrap(ggplot2::vars(name), scales = "free_y") +
+    scale_fill_manual(values = datacol$categories)
+
+}
+```
